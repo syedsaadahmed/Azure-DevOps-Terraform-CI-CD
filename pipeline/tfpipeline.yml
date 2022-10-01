@@ -1,0 +1,85 @@
+trigger: none
+variables:
+  - name: terraform_version
+    value: 1.3.0
+
+stages:
+  - stage: Build
+    jobs:
+      - job: Build
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: Bash@3
+            inputs:
+              filePath: './scripts/terraform-download.sh'
+            displayName: 'Terraform Download'
+
+          - task: Bash@3
+            inputs:
+              targetType: 'inline'
+              script: |
+                terraform init -backend-config="client_id=$(AZURE_CLIENT_ID)" -backend-config="client_secret=$(AZURE_CLIENT_SECRET)" -backend-config="tenant_id=$(AZURE_TENANT_ID)" -backend-config="storage_account_name=$(STORAGE_ACCOUNT_NAME)" -backend-config="container_name=$(CONTAINER_NAME)" -backend-config="key=$(TF_STATE_KEY)"
+              failOnStderr: true
+              workingDirectory: "$(System.DefaultWorkingDirectory)/tf_configuration/"
+            displayName: 'Terraform Init'
+
+          - task: Bash@3
+            inputs:
+              targetType: 'inline'
+              script: |              
+                terraform plan -var 'client_id=$(AZURE_CLIENT_ID)' -var 'client_secret=$(AZURE_CLIENT_SECRET)' -var 'tenant_id=$(AZURE_TENANT_ID)' -input=false -out ${BUILD_BUILDNUMBER}.tfplan
+              failOnStderr: true
+              workingDirectory: "$(System.DefaultWorkingDirectory)/tf_configuration/"
+            displayName: 'Terraform Plan'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(Build.SourcesDirectory)'
+              includeRootFolder: false
+              archiveType: 'tar'
+              tarCompression: 'gz'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).tgz'
+              replaceExistingArchive: true
+            displayName: 'Create Plan Artifact'
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'drop'
+              publishLocation: 'Container'
+            displayName: 'Publish Plan Artifact'
+
+  - stage: Deploy
+    jobs:
+    - deployment: 'DeployToProduction'
+      environment: 'Infrastructure Production'
+      strategy:
+          runOnce:
+            deploy:
+              steps:
+              - checkout: none
+              
+              - task: DownloadBuildArtifacts@0
+                inputs:
+                  artifactName: 'drop'
+                displayName: 'Download Plan Artifact'
+
+              - task: ExtractFiles@1
+                inputs:
+                  archiveFilePatterns: '$(Build.ArtifactStagingDirectory)/drop/$(Build.BuildId).tgz'
+                  destinationFolder: '$(System.DefaultWorkingDirectory)/'
+                  cleanDestinationFolder: false
+                displayName: 'Extract Plan Artifact'
+
+              - task: Bash@3
+                inputs:
+                  targetType: 'inline'
+                  script: |              
+                    terraform apply -auto-approve -input=false ${BUILD_BUILDNUMBER}.tfplan
+                  failOnStderr: true
+                  workingDirectory: "$(System.DefaultWorkingDirectory)/tf_configuration/"
+                displayName: 'Terraform Apply'
